@@ -1,0 +1,34 @@
+[project]
+name = "tracemem"
+version = "0.1.0"
+description = "Temporal evidence ledger for agent memory evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic>=2.10,<3",
+  "pydantic-settings>=2.7,<3",
+  "aiosqlite>=0.20,<1",
+  "httpx>=0.28,<1",
+  "numpy>=2.1,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4,<9",
+  "pytest-asyncio>=0.21,<1",
+]
+
+[project.scripts]
+tracemem = "tracemem.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tracemem"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
