@@ -37,6 +37,7 @@ def build_model_bundle(
             client=client,
             url=settings.embedding_url,
             api_key=settings.embedding_api_key,
+            extra_api_key=settings.embedding_extra_key,
             model=settings.embedding_model,
             timeout_seconds=settings.model_timeout_seconds,
             batch_size=settings.embedding_batch_size,

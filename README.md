@@ -85,6 +85,7 @@ OpenAI-compatible endpoints and credentials:
 ```dotenv
 TRACEMEM_EMBEDDING_URL=https://your-provider/v1/embeddings
 TRACEMEM_EMBEDDING_API_KEY=your-embedding-key
+TRACEMEM_EMBEDDING_EXTRA_KEY=your-optional-x-embedding-key
 TRACEMEM_EMBEDDING_MODEL=your-embedding-model
 
 TRACEMEM_LLM_URL=https://your-provider/v1/chat/completions
@@ -97,7 +98,9 @@ TRACEMEM_RERANK_MODE=disabled
 The URLs may be complete request endpoints or OpenAI-compatible base URLs
 ending in `/v1`; TraceMem appends `/embeddings` or `/chat/completions` only
 for base URLs. Embedding and LLM can use different providers. Rerank remains
-available in code but is disabled by default.
+available in code but is disabled by default. When
+`TRACEMEM_EMBEDDING_EXTRA_KEY` is non-empty, embedding requests also include
+it as the `X-Embedding-Key` header; other model requests never receive it.
 
 ## LoCoMo retrieval evaluation
 

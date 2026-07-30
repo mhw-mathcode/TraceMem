@@ -32,6 +32,7 @@ class Settings(BaseSettings):
         "https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings"
     )
     embedding_api_key: str = ""
+    embedding_extra_key: str = ""
     embedding_model: str = "text-embedding-v4"
     llm_url: str = (
         "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"

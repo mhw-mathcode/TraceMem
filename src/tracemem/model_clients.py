@@ -170,6 +170,7 @@ class OpenAIEmbedder:
         client: httpx.AsyncClient,
         url: str,
         api_key: str,
+        extra_api_key: str = "",
         model: str,
         timeout_seconds: float = 30.0,
         batch_size: int = 10,
@@ -179,6 +180,7 @@ class OpenAIEmbedder:
         self.client = client
         self.url = _openai_endpoint_url(url, "embeddings")
         self.api_key = api_key
+        self.extra_api_key = extra_api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.batch_size = batch_size
@@ -192,11 +194,14 @@ class OpenAIEmbedder:
         expected_dimensions: int | None = None
         for offset in range(0, len(texts), self.batch_size):
             batch = list(texts[offset : offset + self.batch_size])
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            if self.extra_api_key.strip():
+                headers["X-Embedding-Key"] = self.extra_api_key.strip()
             try:
                 response = await _post_with_retry(
                     client=self.client,
                     url=self.url,
-                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    headers=headers,
                     payload={"model": self.model, "input": batch},
                     timeout_seconds=self.timeout_seconds,
                     max_retries=self.max_retries,
