@@ -112,6 +112,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> JSONResponse:
         return JSONResponse(status_code=500, content={"detail": str(error)})
 
+    @app.get("/health", include_in_schema=False)
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     @app.post(
         "/add",
         response_model=AddResponse,

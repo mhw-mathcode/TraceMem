@@ -36,7 +36,7 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1)
     options: list[str] | None = None
     user_id: str = Field(min_length=1)
-    top_k: int = Field(ge=1, le=90)
+    top_k: int = Field(ge=1, le=120)
 
 
 class SearchResult(BaseModel):
