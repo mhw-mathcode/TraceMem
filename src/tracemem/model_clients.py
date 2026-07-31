@@ -42,11 +42,22 @@ class ModelResponseError(ModelError):
 
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_BOUNDED_EMBEDDING_ATTEMPTS = 10
+_BOUNDED_EMBEDDING_DELAY_SECONDS = 0.5
 Sleep = Callable[[float], Awaitable[None]]
 
 
 def _exponential_retry_delay(attempt: int) -> float:
     return min(0.5 * (2 ** min(attempt, 5)), 10.0)
+
+
+def _embedding_input_metrics(texts: Sequence[str]) -> dict[str, int]:
+    lengths = [len(text) for text in texts]
+    return {
+        "batch_items": len(lengths),
+        "max_chars": max(lengths, default=0),
+        "total_chars": sum(lengths),
+    }
 
 
 def _retry_after_seconds(
@@ -228,102 +239,195 @@ class OpenAIEmbedder:
         _ = max_retries
         self.sleep = sleep
 
-    async def _post_until_success(
+    @staticmethod
+    def _parse_vectors(
+        response: httpx.Response,
+        expected_count: int,
+    ) -> list[np.ndarray]:
+        try:
+            items = sorted(
+                response.json()["data"],
+                key=lambda item: item["index"],
+            )
+            if len(items) != expected_count:
+                raise ValueError("embedding count mismatch")
+            if any(
+                item["index"] != expected_index
+                for expected_index, item in enumerate(items)
+            ):
+                raise ValueError("embedding indexes mismatch")
+            vectors = [
+                np.asarray(item["embedding"], dtype=np.float32).reshape(-1)
+                for item in items
+            ]
+            if not vectors:
+                raise ValueError("empty embedding response")
+            dimensions = vectors[0].size
+            if dimensions == 0 or any(
+                vector.size != dimensions for vector in vectors
+            ):
+                raise ValueError("embedding dimensions mismatch")
+            return vectors
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as error:
+            raise ModelResponseError(
+                "Embedding response has an invalid schema"
+            ) from error
+
+    async def _embed_batch(
         self,
         *,
         headers: dict[str, str],
-        payload: dict[str, Any],
-    ) -> httpx.Response:
-        attempt = 0
+        batch: Sequence[str],
+        bounded_attempts: int,
+    ) -> list[np.ndarray] | None:
+        temporary_attempt = 0
+        bounded_attempt = 0
+        metrics = _embedding_input_metrics(batch)
         while True:
             try:
                 async with self._semaphore:
                     response = await self.client.post(
                         self.url,
                         headers=headers,
-                        json=payload,
+                        json={"model": self.model, "input": list(batch)},
                         timeout=self.timeout_seconds,
                     )
             except (httpx.TransportError, anyio.EndOfStream) as error:
-                delay = _exponential_retry_delay(attempt)
+                delay = _exponential_retry_delay(temporary_attempt)
                 log_event(
                     logger,
                     logging.WARNING,
                     "embedding_retry",
-                    attempt=attempt + 1,
+                    attempt=temporary_attempt + 1,
                     error=type(error).__name__,
                     delay=delay,
+                    **metrics,
                 )
-            else:
-                if response.status_code not in _RETRYABLE_STATUS_CODES:
-                    response.raise_for_status()
-                    return response
+                temporary_attempt += 1
+                await self.sleep(delay)
+                continue
+
+            if response.status_code in _RETRYABLE_STATUS_CODES:
                 retry_after = _retry_after_seconds(response)
                 delay = (
                     retry_after
                     if retry_after is not None
-                    else _exponential_retry_delay(attempt)
+                    else _exponential_retry_delay(temporary_attempt)
                 )
                 log_event(
                     logger,
                     logging.WARNING,
                     "embedding_retry",
-                    attempt=attempt + 1,
+                    attempt=temporary_attempt + 1,
                     status=response.status_code,
                     delay=delay,
+                    **metrics,
                 )
-            attempt += 1
-            await self.sleep(delay)
+                temporary_attempt += 1
+                await self.sleep(delay)
+                continue
+
+            failure_status: int | None = None
+            failure_error: str | None = None
+            if response.is_error:
+                failure_status = response.status_code
+            else:
+                try:
+                    return self._parse_vectors(response, len(batch))
+                except ModelResponseError as error:
+                    failure_error = type(error).__name__
+
+            bounded_attempt += 1
+            if bounded_attempt >= bounded_attempts:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "embedding_batch_failed",
+                    attempt=bounded_attempt,
+                    status=failure_status,
+                    error=failure_error,
+                    **metrics,
+                )
+                return None
+
+            log_event(
+                logger,
+                logging.WARNING,
+                "embedding_retry",
+                attempt=bounded_attempt,
+                status=failure_status,
+                error=failure_error,
+                delay=_BOUNDED_EMBEDDING_DELAY_SECONDS,
+                **metrics,
+            )
+            await self.sleep(_BOUNDED_EMBEDDING_DELAY_SECONDS)
 
     async def embed(self, texts: Sequence[str]) -> list[np.ndarray]:
         if not texts:
             return []
         vectors: list[np.ndarray] = []
         expected_dimensions: int | None = None
+        empty_vectors = 0
         for offset in range(0, len(texts), self.batch_size):
             batch = list(texts[offset : offset + self.batch_size])
             headers = {"Authorization": f"Bearer {self.api_key}"}
             if self.extra_api_key.strip():
                 headers["X-Embedding-Key"] = self.extra_api_key.strip()
-            try:
-                response = await self._post_until_success(
-                    headers=headers,
-                    payload={"model": self.model, "input": batch},
+            batch_vectors = await self._embed_batch(
+                headers=headers,
+                batch=batch,
+                bounded_attempts=_BOUNDED_EMBEDDING_ATTEMPTS,
+            )
+            if batch_vectors is None and len(batch) > 1:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "embedding_batch_isolation",
+                    attempts=_BOUNDED_EMBEDDING_ATTEMPTS,
+                    **_embedding_input_metrics(batch),
                 )
-            except httpx.HTTPError as error:
-                raise ModelTransportError(
-                    f"Embedding endpoint failed with {type(error).__name__}"
-                ) from error
-            try:
-                items = sorted(
-                    response.json()["data"],
-                    key=lambda item: item["index"],
-                )
-                if len(items) != len(batch):
-                    raise ValueError("embedding count mismatch")
-                batch_vectors = [
-                    np.asarray(item["embedding"], dtype=np.float32).reshape(-1)
-                    for item in items
-                ]
-                if not batch_vectors:
-                    raise ValueError("empty embedding response")
+                batch_vectors = []
+                for text in batch:
+                    isolated = await self._embed_batch(
+                        headers=headers,
+                        batch=[text],
+                        bounded_attempts=1,
+                    )
+                    batch_vectors.append(
+                        isolated[0]
+                        if isolated is not None
+                        else np.asarray([], dtype=np.float32)
+                    )
+            elif batch_vectors is None:
+                batch_vectors = [np.asarray([], dtype=np.float32)]
+
+            for vector in batch_vectors:
+                if vector.size == 0:
+                    vectors.append(vector)
+                    empty_vectors += 1
+                    continue
                 if expected_dimensions is None:
-                    expected_dimensions = batch_vectors[0].size
-                if expected_dimensions == 0 or any(
-                    vector.size != expected_dimensions
-                    for vector in batch_vectors
-                ):
-                    raise ValueError("embedding dimensions mismatch")
-                vectors.extend(batch_vectors)
-            except (
-                KeyError,
-                TypeError,
-                ValueError,
-                json.JSONDecodeError,
-            ) as error:
-                raise ModelResponseError(
-                    "Embedding response has an invalid schema"
-                ) from error
+                    expected_dimensions = vector.size
+                if vector.size != expected_dimensions:
+                    vectors.append(np.asarray([], dtype=np.float32))
+                    empty_vectors += 1
+                    continue
+                vectors.append(vector)
+
+        if empty_vectors:
+            log_event(
+                logger,
+                logging.WARNING,
+                "embedding_degraded",
+                real_vectors=len(vectors) - empty_vectors,
+                empty_vectors=empty_vectors,
+                total_vectors=len(vectors),
+            )
         return vectors
 
 

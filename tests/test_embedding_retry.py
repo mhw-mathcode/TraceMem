@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -7,7 +8,7 @@ import httpx
 import pytest
 
 from tracemem.config import Settings
-from tracemem.model_clients import ModelTransportError, OpenAIEmbedder
+from tracemem.model_clients import OpenAIEmbedder
 from tracemem.runtime import build_model_bundle
 
 
@@ -136,7 +137,9 @@ async def test_embedding_ignores_non_finite_retry_after(
 
 
 @pytest.mark.asyncio
-async def test_embedding_does_not_retry_permanent_http_error() -> None:
+async def test_embedding_degrades_permanent_http_error_after_ten_attempts(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     attempts = 0
     delays: list[float] = []
 
@@ -153,16 +156,137 @@ async def test_embedding_does_not_retry_permanent_http_error() -> None:
     ) as client:
         embedder = OpenAIEmbedder(
             client=client,
+            url="https://SECRET_ENDPOINT.test/v1/embeddings",
+            api_key="SECRET_API_KEY",
+            model="embedding",
+            sleep=record_sleep,
+        )
+        with caplog.at_level(
+            logging.WARNING,
+            logger="tracemem.model_clients",
+        ):
+            vectors = await embedder.embed(["SECRET_INPUT"])
+
+    assert attempts == 10
+    assert delays == [0.5] * 9
+    assert len(vectors) == 1
+    assert vectors[0].size == 0
+    assert "status=401" in caplog.text
+    assert "attempt=10" in caplog.text
+    assert "batch_items=1" in caplog.text
+    assert "max_chars=12" in caplog.text
+    assert "total_chars=12" in caplog.text
+    for secret in (
+        "SECRET_ENDPOINT",
+        "SECRET_API_KEY",
+        "SECRET_INPUT",
+    ):
+        assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_embedding_recovers_from_permanent_error_before_limit() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(400)
+        return _embedding_response()
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond)
+    ) as client:
+        embedder = OpenAIEmbedder(
+            client=client,
             url="https://example.test/v1/embeddings",
             api_key="secret",
             model="embedding",
             sleep=record_sleep,
         )
-        with pytest.raises(ModelTransportError):
-            await embedder.embed(["hello"])
+        vectors = await embedder.embed(["hello"])
 
-    assert attempts == 1
-    assert delays == []
+    assert attempts == 3
+    assert delays == [0.5, 0.5]
+    assert vectors[0].tolist() == [1.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_embedding_isolates_batch_and_preserves_good_items() -> None:
+    batch_attempts = 0
+    isolated_inputs: list[str] = []
+    delays: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal batch_attempts
+        inputs = json.loads(request.content)["input"]
+        if len(inputs) == 2:
+            batch_attempts += 1
+            return httpx.Response(400)
+        isolated_inputs.append(inputs[0])
+        if inputs[0] == "bad":
+            return httpx.Response(422)
+        return httpx.Response(
+            200,
+            json={"data": [{"index": 0, "embedding": [1.0, 2.0]}]},
+        )
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond)
+    ) as client:
+        embedder = OpenAIEmbedder(
+            client=client,
+            url="https://example.test/v1/embeddings",
+            api_key="secret",
+            model="embedding",
+            sleep=record_sleep,
+        )
+        vectors = await embedder.embed(["good", "bad"])
+
+    assert batch_attempts == 10
+    assert isolated_inputs == ["good", "bad"]
+    assert delays == [0.5] * 9
+    assert vectors[0].tolist() == [1.0, 2.0]
+    assert vectors[1].size == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_degrades_invalid_success_response() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, json={"data": []})
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond)
+    ) as client:
+        embedder = OpenAIEmbedder(
+            client=client,
+            url="https://example.test/v1/embeddings",
+            api_key="secret",
+            model="embedding",
+            sleep=record_sleep,
+        )
+        vectors = await embedder.embed(["hello"])
+
+    assert attempts == 10
+    assert delays == [0.5] * 9
+    assert len(vectors) == 1
+    assert vectors[0].size == 0
 
 
 @pytest.mark.asyncio
