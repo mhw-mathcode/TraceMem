@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Awaitable, Callable, Protocol, Sequence
 
 import anyio
@@ -22,6 +25,9 @@ from tracemem.domain import Candidate, ExtractedCard
 from tracemem.text import lexical_text, timestamp_to_datetime
 
 
+logger = logging.getLogger(__name__)
+
+
 class ModelError(RuntimeError):
     """Base error for an external or local model boundary."""
 
@@ -36,6 +42,34 @@ class ModelResponseError(ModelError):
 
 _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 Sleep = Callable[[float], Awaitable[None]]
+
+
+def _exponential_retry_delay(attempt: int) -> float:
+    return min(0.5 * (2 ** min(attempt, 5)), 10.0)
+
+
+def _retry_after_seconds(
+    response: httpx.Response,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        delay = float(value)
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        return max((retry_at - current).total_seconds(), 0.0)
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return delay
 
 
 def _openai_endpoint_url(url: str, endpoint: str) -> str:
@@ -174,6 +208,7 @@ class OpenAIEmbedder:
         model: str,
         timeout_seconds: float = 30.0,
         batch_size: int = 10,
+        max_concurrency: int = 3,
         max_retries: int = 2,
         sleep: Sleep = asyncio.sleep,
     ) -> None:
@@ -184,8 +219,56 @@ class OpenAIEmbedder:
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.batch_size = batch_size
-        self.max_retries = max_retries
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency must be at least 1")
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        # Retained in the constructor for compatibility with existing callers.
+        # Remote embedding retries are intentionally no longer count-limited.
+        _ = max_retries
         self.sleep = sleep
+
+    async def _post_until_success(
+        self,
+        *,
+        headers: dict[str, str],
+        payload: dict[str, Any],
+    ) -> httpx.Response:
+        attempt = 0
+        while True:
+            try:
+                async with self._semaphore:
+                    response = await self.client.post(
+                        self.url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.timeout_seconds,
+                    )
+            except (httpx.TransportError, anyio.EndOfStream) as error:
+                delay = _exponential_retry_delay(attempt)
+                logger.warning(
+                    "Embedding retry attempt=%d error=%s delay=%.3f",
+                    attempt + 1,
+                    type(error).__name__,
+                    delay,
+                )
+            else:
+                if response.status_code not in _RETRYABLE_STATUS_CODES:
+                    response.raise_for_status()
+                    return response
+                retry_after = _retry_after_seconds(response)
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else _exponential_retry_delay(attempt)
+                )
+                logger.warning(
+                    "Embedding retry attempt=%d status=%d delay=%.3f",
+                    attempt + 1,
+                    response.status_code,
+                    delay,
+                )
+            attempt += 1
+            await self.sleep(delay)
 
     async def embed(self, texts: Sequence[str]) -> list[np.ndarray]:
         if not texts:
@@ -198,14 +281,9 @@ class OpenAIEmbedder:
             if self.extra_api_key.strip():
                 headers["X-Embedding-Key"] = self.extra_api_key.strip()
             try:
-                response = await _post_with_retry(
-                    client=self.client,
-                    url=self.url,
+                response = await self._post_until_success(
                     headers=headers,
                     payload={"model": self.model, "input": batch},
-                    timeout_seconds=self.timeout_seconds,
-                    max_retries=self.max_retries,
-                    sleep=self.sleep,
                 )
             except httpx.HTTPError as error:
                 raise ModelTransportError(

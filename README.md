@@ -87,6 +87,7 @@ TRACEMEM_EMBEDDING_URL=https://your-provider/v1/embeddings
 TRACEMEM_EMBEDDING_API_KEY=your-embedding-key
 TRACEMEM_EMBEDDING_EXTRA_KEY=your-optional-x-embedding-key
 TRACEMEM_EMBEDDING_MODEL=your-embedding-model
+TRACEMEM_EMBEDDING_MAX_CONCURRENCY=3
 
 TRACEMEM_LLM_URL=https://your-provider/v1/chat/completions
 TRACEMEM_LLM_API_KEY=your-llm-key
@@ -101,6 +102,11 @@ for base URLs. Embedding and LLM can use different providers. Rerank remains
 available in code but is disabled by default. When
 `TRACEMEM_EMBEDDING_EXTRA_KEY` is non-empty, embedding requests also include
 it as the `X-Embedding-Key` header; other model requests never receive it.
+Remote embedding calls retry connection failures and HTTP 429/500/502/503/504
+responses until they succeed, using exponential backoff and `Retry-After` when
+provided. `TRACEMEM_EMBEDDING_MAX_CONCURRENCY` limits simultaneous embedding
+HTTP attempts and defaults to `3`. `TRACEMEM_MODEL_MAX_RETRIES` continues to
+limit extraction and reranking retries; it does not limit embedding retries.
 
 ## LoCoMo retrieval evaluation
 

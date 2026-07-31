@@ -41,7 +41,7 @@ def build_model_bundle(
             model=settings.embedding_model,
             timeout_seconds=settings.model_timeout_seconds,
             batch_size=settings.embedding_batch_size,
-            max_retries=settings.model_max_retries,
+            max_concurrency=settings.embedding_max_concurrency,
         )
     else:
         embedder = HashEmbedder(dimensions=settings.embedding_dimensions)

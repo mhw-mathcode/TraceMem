@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = Field(default=45.0, gt=0)
     model_max_retries: int = Field(default=2, ge=0, le=10)
     embedding_batch_size: int = Field(default=10, ge=1, le=100)
+    embedding_max_concurrency: int = Field(default=3, ge=1, le=100)
     embedding_dimensions: int = Field(default=256, ge=8)
     add_lease_seconds: int = Field(default=120, ge=1)
     final_result_limit: int = Field(default=30, ge=1, le=90)
