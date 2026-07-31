@@ -42,6 +42,11 @@ class FakeEmbedder:
         ]
 
 
+class EmptyEmbedder:
+    async def embed(self, texts: Sequence[str]) -> list[np.ndarray]:
+        return [np.asarray([], dtype=np.float32) for _text in texts]
+
+
 class FailingExtractor:
     async def extract(
         self,
@@ -433,3 +438,48 @@ async def test_retriever_logs_embedding_and_channel_counts(
         "SECRET_RETRIEVAL_OPTION",
     ):
         assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_empty_embeddings_commit_and_search_lexically(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = Database(tmp_path / "lexical-only.db")
+    database.initialize()
+    add_service = AddService(
+        database=database,
+        embedder=EmptyEmbedder(),
+        extractor=DisabledExtractor(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="tracemem.add_service"):
+        response = await add_service.add(
+            AddRequest(
+                request_id="lexical-only",
+                user_id="user",
+                session_id="session",
+                messages=[
+                    MemoryMessage(role="user", content="purple bicycles")
+                ],
+            )
+        )
+
+    retriever = HybridRetriever(
+        database=database,
+        embedder=EmptyEmbedder(),
+        cards_enabled=False,
+        state_enabled=False,
+    )
+    with caplog.at_level(logging.INFO, logger="tracemem.retrieval"):
+        candidates = await retriever.retrieve(
+            user_id="user",
+            query="purple bicycles",
+            search_id="abcdef123456",
+        )
+
+    assert response.success is True
+    assert [candidate.content for candidate in candidates] == [
+        "purple bicycles"
+    ]
+    assert caplog.text.count("empty_vectors=1") == 2

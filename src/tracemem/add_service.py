@@ -183,6 +183,7 @@ class AddService:
             "add_episode_embedding_completed",
             request_id=request.request_id,
             vectors=len(vectors),
+            empty_vectors=sum(1 for vector in vectors if vector.size == 0),
             duration_ms=duration_ms(episode_embedding_started),
         )
 
@@ -246,6 +247,9 @@ class AddService:
                     "add_card_embedding_completed",
                     request_id=request.request_id,
                     vectors=len(card_vectors),
+                    empty_vectors=sum(
+                        1 for vector in card_vectors if vector.size == 0
+                    ),
                     duration_ms=duration_ms(card_embedding_started),
                 )
                 episode_ids = {

@@ -129,6 +129,9 @@ class HybridRetriever:
             "search_query_embedding_completed",
             search_id=search_id,
             vectors=len(query_vectors),
+            empty_vectors=sum(
+                1 for vector in query_vectors if vector.size == 0
+            ),
             duration_ms=duration_ms(embedding_started),
         )
 
