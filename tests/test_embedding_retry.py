@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 
@@ -18,7 +19,9 @@ def _embedding_response() -> httpx.Response:
 
 
 @pytest.mark.asyncio
-async def test_embedding_retries_retryable_status_until_success() -> None:
+async def test_embedding_retries_retryable_status_until_success(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     attempts = 0
     delays: list[float] = []
 
@@ -37,17 +40,28 @@ async def test_embedding_retries_retryable_status_until_success() -> None:
     ) as client:
         embedder = OpenAIEmbedder(
             client=client,
-            url="https://example.test/v1/embeddings",
-            api_key="secret",
+            url="https://SECRET_ENDPOINT.test/v1/embeddings",
+            api_key="SECRET_API_KEY",
             model="embedding",
             max_retries=2,
             sleep=record_sleep,
         )
-        vectors = await embedder.embed(["hello"])
+        with caplog.at_level(
+            logging.WARNING,
+            logger="tracemem.model_clients",
+        ):
+            vectors = await embedder.embed(["SECRET_EMBEDDING_INPUT"])
 
     assert attempts == 5
     assert delays == [0.5, 1.0, 2.0, 4.0]
     assert vectors[0].tolist() == [1.0, 0.0]
+    assert "event=embedding_retry attempt=1 status=503 delay=0.5" in caplog.text
+    for secret in (
+        "SECRET_ENDPOINT",
+        "SECRET_API_KEY",
+        "SECRET_EMBEDDING_INPUT",
+    ):
+        assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -230,7 +244,9 @@ async def test_embedding_honors_retry_after_http_date() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embedding_recovers_from_connection_error() -> None:
+async def test_embedding_recovers_from_connection_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     attempts = 0
     delays: list[float] = []
 
@@ -254,10 +270,17 @@ async def test_embedding_recovers_from_connection_error() -> None:
             model="embedding",
             sleep=record_sleep,
         )
-        await embedder.embed(["hello"])
+        with caplog.at_level(
+            logging.WARNING,
+            logger="tracemem.model_clients",
+        ):
+            await embedder.embed(["hello"])
 
     assert attempts == 2
     assert delays == [0.5]
+    assert (
+        "event=embedding_retry attempt=1 error=ConnectError delay=0.5"
+    ) in caplog.text
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     )
 
     api_key: str = ""
+    log_level: Literal[
+        "DEBUG",
+        "INFO",
+        "WARNING",
+        "ERROR",
+        "CRITICAL",
+    ] = "INFO"
     database_path: Path = Path("data/tracemem.db")
     profile: AblationProfile = AblationProfile.FULL
     embedding_mode: Literal["hash", "openai"] = "hash"

@@ -76,6 +76,15 @@ After changing `.env`, restart the Uvicorn process so it loads the new key.
 Swagger at `/docs` remains public; click **Authorize** and enter the key to
 test `/add` and `/search`.
 
+## Internal logs
+
+TraceMem writes grep-friendly internal events to standard error. With the
+documented `nohup` command they are collected in `/tmp/tracemem.log` alongside
+Uvicorn access logs. Set `TRACEMEM_LOG_LEVEL=INFO` (the default) to record
+startup, database initialization, Add/Search stages, durations, degradation,
+and embedding retries. Logs contain identifiers and counts but never message
+content, query text, user/session IDs, credentials, or model bodies.
+
 ## Model configuration
 
 Copy the values in `.env.example` to `.env`. A local `.env` is already

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+from time import perf_counter
 from typing import AsyncIterator
 
 import httpx
@@ -25,22 +28,63 @@ from tracemem.config import Settings
 from tracemem.db import Database
 from tracemem.evidence import EvidencePacker
 from tracemem.model_clients import ModelError
+from tracemem.observability import (
+    configure_logging,
+    duration_ms,
+    log_event,
+)
 from tracemem.retrieval import HybridRetriever
 from tracemem.runtime import build_model_bundle
 from tracemem.search_service import SearchService
+
+
+logger = logging.getLogger(__name__)
+
+
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         active_settings = settings or Settings()
-        active_settings.require_api_key()
-        app.state.api_key = active_settings.api_key
-        database = Database(active_settings.database_path)
-        database.initialize()
-
-        client = httpx.AsyncClient()
+        configure_logging(active_settings.log_level)
+        startup_started = perf_counter()
+        stage = "settings_validation"
+        log_event(
+            logger,
+            logging.INFO,
+            "startup_started",
+            profile=active_settings.profile,
+            embedding_mode=active_settings.embedding_mode,
+            extraction_mode=active_settings.extraction_mode,
+            rerank_mode=active_settings.rerank_mode,
+        )
+        client: httpx.AsyncClient | None = None
         try:
+            active_settings.require_api_key()
+            app.state.api_key = active_settings.api_key
+
+            stage = "database_initialization"
+            database_started = perf_counter()
+            database = Database(active_settings.database_path)
+            database.initialize()
+            database_path = database.path.resolve()
+            log_event(
+                logger,
+                logging.INFO,
+                "database_initialized",
+                path=database_path,
+                size=_file_size(database_path),
+                duration_ms=duration_ms(database_started),
+            )
+
+            stage = "model_initialization"
+            client = httpx.AsyncClient()
             models = build_model_bundle(active_settings, client)
             retriever = HybridRetriever(
                 database=database,
@@ -62,9 +106,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     pairing_enabled=active_settings.evidence_pairing_enabled
                 ),
             )
+        except Exception as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "startup_failed",
+                stage=stage,
+                error=type(error).__name__,
+                duration_ms=duration_ms(startup_started),
+            )
+            if client is not None:
+                await client.aclose()
+            raise
+
+        log_event(
+            logger,
+            logging.INFO,
+            "startup_completed",
+            duration_ms=duration_ms(startup_started),
+        )
+        try:
             yield
         finally:
+            shutdown_started = perf_counter()
+            assert client is not None
             await client.aclose()
+            log_event(
+                logger,
+                logging.INFO,
+                "shutdown_completed",
+                duration_ms=duration_ms(shutdown_started),
+            )
 
     app = FastAPI(
         title="TraceMem",

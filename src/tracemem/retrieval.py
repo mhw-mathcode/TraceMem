@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import replace
+from time import perf_counter
 
 import numpy as np
 
@@ -9,7 +11,11 @@ from tracemem.db import Database
 from tracemem.domain import Candidate, VectorRecord
 from tracemem.evidence import QueryPlan
 from tracemem.model_clients import Embedder
+from tracemem.observability import duration_ms, log_event
 from tracemem.text import lexical_text
+
+
+logger = logging.getLogger(__name__)
 
 
 def cosine_candidates(
@@ -103,7 +109,9 @@ class HybridRetriever:
         query: str,
         options: Sequence[str] | None = None,
         plan: QueryPlan | None = None,
+        search_id: str | None = None,
     ) -> list[Candidate]:
+        started = perf_counter()
         semantic_query = query
         if options:
             semantic_query += "\nOptions:\n" + "\n".join(options)
@@ -111,12 +119,26 @@ class HybridRetriever:
         if not lexical_query and not lexical_text(semantic_query):
             return []
 
+        embedding_started = perf_counter()
         query_vectors = await self.embedder.embed([semantic_query])
         if len(query_vectors) != 1:
             raise RuntimeError("query embedder returned the wrong vector count")
+        log_event(
+            logger,
+            logging.INFO,
+            "search_query_embedding_completed",
+            search_id=search_id,
+            vectors=len(query_vectors),
+            duration_ms=duration_ms(embedding_started),
+        )
 
         channels: list[list[Candidate]] = []
         weights: list[float] = []
+        episode_bm25_count = 0
+        episode_vector_count = 0
+        card_bm25_count = 0
+        card_vector_count = 0
+        state_count = 0
         channel_weights = (
             plan.channel_weights
             if plan
@@ -129,40 +151,40 @@ class HybridRetriever:
             }
         )
         if lexical_query:
-            channels.append(
-                self.database.search_episode_fts(
-                    user_id,
-                    lexical_query,
-                    self.per_channel_limit,
-                )
+            episode_bm25 = self.database.search_episode_fts(
+                user_id,
+                lexical_query,
+                self.per_channel_limit,
             )
+            episode_bm25_count = len(episode_bm25)
+            channels.append(episode_bm25)
             weights.append(channel_weights["episode_bm25"])
-        channels.append(
-            cosine_candidates(
-                query_vectors[0],
-                self.database.load_episode_vectors(user_id),
-                limit=self.per_channel_limit,
-            )
+        episode_vector = cosine_candidates(
+            query_vectors[0],
+            self.database.load_episode_vectors(user_id),
+            limit=self.per_channel_limit,
         )
+        episode_vector_count = len(episode_vector)
+        channels.append(episode_vector)
         weights.append(channel_weights["episode_vector"])
 
         if self.cards_enabled:
             if lexical_query:
-                channels.append(
-                    self.database.search_card_fts(
-                        user_id,
-                        lexical_query,
-                        self.per_channel_limit,
-                    )
+                card_bm25 = self.database.search_card_fts(
+                    user_id,
+                    lexical_query,
+                    self.per_channel_limit,
                 )
+                card_bm25_count = len(card_bm25)
+                channels.append(card_bm25)
                 weights.append(channel_weights["card_bm25"])
-            channels.append(
-                cosine_candidates(
-                    query_vectors[0],
-                    self.database.load_card_vectors(user_id),
-                    limit=self.per_channel_limit,
-                )
+            card_vector = cosine_candidates(
+                query_vectors[0],
+                self.database.load_card_vectors(user_id),
+                limit=self.per_channel_limit,
             )
+            card_vector_count = len(card_vector)
+            channels.append(card_vector)
             weights.append(channel_weights["card_vector"])
 
         if self.state_enabled:
@@ -177,7 +199,23 @@ class HybridRetriever:
                 ]
                 if matching:
                     states = matching
-            channels.append(states[: self.per_channel_limit])
+            states = states[: self.per_channel_limit]
+            state_count = len(states)
+            channels.append(states)
             weights.append(channel_weights["state"])
 
-        return reciprocal_rank_fusion(channels, weights=weights)
+        fused = reciprocal_rank_fusion(channels, weights=weights)
+        log_event(
+            logger,
+            logging.INFO,
+            "search_channels_completed",
+            search_id=search_id,
+            episode_bm25=episode_bm25_count,
+            episode_vector=episode_vector_count,
+            card_bm25=card_bm25_count,
+            card_vector=card_vector_count,
+            state=state_count,
+            fused=len(fused),
+            duration_ms=duration_ms(started),
+        )
+        return fused

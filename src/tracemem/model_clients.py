@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from tracemem.domain import Candidate, ExtractedCard
+from tracemem.observability import log_event
 from tracemem.text import lexical_text, timestamp_to_datetime
 
 
@@ -245,11 +246,13 @@ class OpenAIEmbedder:
                     )
             except (httpx.TransportError, anyio.EndOfStream) as error:
                 delay = _exponential_retry_delay(attempt)
-                logger.warning(
-                    "Embedding retry attempt=%d error=%s delay=%.3f",
-                    attempt + 1,
-                    type(error).__name__,
-                    delay,
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "embedding_retry",
+                    attempt=attempt + 1,
+                    error=type(error).__name__,
+                    delay=delay,
                 )
             else:
                 if response.status_code not in _RETRYABLE_STATUS_CODES:
@@ -261,11 +264,13 @@ class OpenAIEmbedder:
                     if retry_after is not None
                     else _exponential_retry_delay(attempt)
                 )
-                logger.warning(
-                    "Embedding retry attempt=%d status=%d delay=%.3f",
-                    attempt + 1,
-                    response.status_code,
-                    delay,
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "embedding_retry",
+                    attempt=attempt + 1,
+                    status=response.status_code,
+                    delay=delay,
                 )
             attempt += 1
             await self.sleep(delay)

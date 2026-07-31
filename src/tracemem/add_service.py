@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
+from time import perf_counter
 
 from tracemem.api_models import AddRequest, AddResponse
 from tracemem.db import Database
@@ -14,6 +16,7 @@ from tracemem.model_clients import (
     MessageForExtraction,
     ModelError,
 )
+from tracemem.observability import duration_ms, log_event
 from tracemem.text import (
     lexical_text,
     payload_hash,
@@ -24,6 +27,9 @@ from tracemem.text import (
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+logger = logging.getLogger(__name__)
 
 
 class AddError(RuntimeError):
@@ -63,27 +69,96 @@ class AddService:
         self.ledger = ledger or Ledger()
 
     async def add(self, request: AddRequest) -> AddResponse:
+        started = perf_counter()
+        log_event(
+            logger,
+            logging.INFO,
+            "add_started",
+            request_id=request.request_id,
+            messages=len(request.messages),
+        )
         digest = payload_hash(request)
         deadline = asyncio.get_running_loop().time() + self.wait_seconds
+        claim_started = perf_counter()
+        claim_attempts = 0
         while True:
-            claim = self.database.claim_add(
-                request.request_id,
-                request.user_id,
-                request.session_id,
-                digest,
-                self.lease_seconds,
-            )
+            claim_attempts += 1
+            try:
+                claim = self.database.claim_add(
+                    request.request_id,
+                    request.user_id,
+                    request.session_id,
+                    digest,
+                    self.lease_seconds,
+                )
+            except Exception as error:
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "add_failed",
+                    request_id=request.request_id,
+                    stage="claim",
+                    error=type(error).__name__,
+                    duration_ms=duration_ms(started),
+                )
+                raise
             if claim.status is ClaimStatus.COMPLETED:
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "add_claimed",
+                    request_id=request.request_id,
+                    status=claim.status,
+                    attempts=claim_attempts,
+                    duration_ms=duration_ms(claim_started),
+                )
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "add_completed",
+                    request_id=request.request_id,
+                    replayed=True,
+                    duration_ms=duration_ms(started),
+                )
                 return self._response(request)
             if claim.status is ClaimStatus.CONFLICT:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "add_failed",
+                    request_id=request.request_id,
+                    stage="claim",
+                    error="AddConflict",
+                    duration_ms=duration_ms(started),
+                )
                 raise AddConflict("request_id was already used with another payload")
             if claim.status is ClaimStatus.CLAIMED:
                 break
             if asyncio.get_running_loop().time() >= deadline:
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "add_failed",
+                    request_id=request.request_id,
+                    stage="claim",
+                    error="AddBusy",
+                    duration_ms=duration_ms(started),
+                )
                 raise AddBusy("an identical Add request is still processing")
             await asyncio.sleep(0.05)
 
+        log_event(
+            logger,
+            logging.INFO,
+            "add_claimed",
+            request_id=request.request_id,
+            status=claim.status,
+            attempts=claim_attempts,
+            duration_ms=duration_ms(claim_started),
+        )
+
         ingested_at = self.clock().astimezone(timezone.utc)
+        episode_embedding_started = perf_counter()
         try:
             vectors = await self.embedder.embed(
                 [message.content for message in request.messages]
@@ -92,7 +167,24 @@ class AddService:
                 raise RuntimeError("embedding count mismatch")
         except Exception as error:
             self.database.mark_add_failed(request.request_id, "embedding_failed")
+            log_event(
+                logger,
+                logging.ERROR,
+                "add_failed",
+                request_id=request.request_id,
+                stage="episode_embedding",
+                error=type(error).__name__,
+                duration_ms=duration_ms(started),
+            )
             raise AddDependencyError("episode embedding failed") from error
+        log_event(
+            logger,
+            logging.INFO,
+            "add_episode_embedding_completed",
+            request_id=request.request_id,
+            vectors=len(vectors),
+            duration_ms=duration_ms(episode_embedding_started),
+        )
 
         episodes = [
             EpisodeDraft(
@@ -116,6 +208,8 @@ class AddService:
         state_versions = ()
         close_version_ids = ()
         raw_only = True
+        degradation_stage = "extraction"
+        extraction_started = perf_counter()
         try:
             extracted = await self.extractor.extract(
                 [
@@ -128,14 +222,32 @@ class AddService:
                     for index, message in enumerate(request.messages)
                 ]
             )
+            log_event(
+                logger,
+                logging.INFO,
+                "add_extraction_completed",
+                request_id=request.request_id,
+                cards=len(extracted),
+                duration_ms=duration_ms(extraction_started),
+            )
             if extracted:
                 card_texts = [
                     f"{card.subject} {card.predicate} {card.object}"
                     for card in extracted
                 ]
+                degradation_stage = "card_embedding"
+                card_embedding_started = perf_counter()
                 card_vectors = await self.embedder.embed(card_texts)
                 if len(card_vectors) != len(extracted):
                     raise RuntimeError("card embedding count mismatch")
+                log_event(
+                    logger,
+                    logging.INFO,
+                    "add_card_embedding_completed",
+                    request_id=request.request_id,
+                    vectors=len(card_vectors),
+                    duration_ms=duration_ms(card_embedding_started),
+                )
                 episode_ids = {
                     episode.message_index: episode.id for episode in episodes
                 }
@@ -184,21 +296,79 @@ class AddService:
                 state_versions = plan.new_versions
                 close_version_ids = plan.close_version_ids
                 raw_only = False
-        except ModelError:
+        except ModelError as error:
             raw_only = True
-        except (KeyError, RuntimeError):
+            log_event(
+                logger,
+                logging.WARNING,
+                "add_degraded",
+                request_id=request.request_id,
+                stage=degradation_stage,
+                error=type(error).__name__,
+            )
+        except (KeyError, RuntimeError) as error:
             cards = []
             state_versions = ()
             close_version_ids = ()
             raw_only = True
+            log_event(
+                logger,
+                logging.WARNING,
+                "add_degraded",
+                request_id=request.request_id,
+                stage=degradation_stage,
+                error=type(error).__name__,
+            )
+        except Exception as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "add_failed",
+                request_id=request.request_id,
+                stage=degradation_stage,
+                error=type(error).__name__,
+                duration_ms=duration_ms(started),
+            )
+            raise
 
-        self.database.commit_add(
+        commit_started = perf_counter()
+        try:
+            self.database.commit_add(
+                request_id=request.request_id,
+                episodes=episodes,
+                cards=cards,
+                state_versions=state_versions,
+                close_version_ids=close_version_ids,
+                raw_only=raw_only,
+            )
+        except Exception as error:
+            log_event(
+                logger,
+                logging.ERROR,
+                "add_failed",
+                request_id=request.request_id,
+                stage="commit",
+                error=type(error).__name__,
+                duration_ms=duration_ms(started),
+            )
+            raise
+        log_event(
+            logger,
+            logging.INFO,
+            "add_commit_completed",
             request_id=request.request_id,
-            episodes=episodes,
-            cards=cards,
-            state_versions=state_versions,
-            close_version_ids=close_version_ids,
+            episodes=len(episodes),
+            cards=len(cards),
             raw_only=raw_only,
+            duration_ms=duration_ms(commit_started),
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "add_completed",
+            request_id=request.request_id,
+            replayed=False,
+            duration_ms=duration_ms(started),
         )
         return self._response(request)
 
