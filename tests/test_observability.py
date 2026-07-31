@@ -7,6 +7,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Iterator, Sequence
 
+import httpx
 import numpy as np
 import pytest
 
@@ -483,3 +484,77 @@ async def test_empty_embeddings_commit_and_search_lexically(
         "purple bicycles"
     ]
     assert caplog.text.count("empty_vectors=1") == 2
+
+
+@pytest.mark.asyncio
+async def test_rejected_openai_embeddings_return_successful_http_responses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream_attempts = 0
+
+    def reject_embedding(request: httpx.Request) -> httpx.Response:
+        nonlocal upstream_attempts
+        upstream_attempts += 1
+        return httpx.Response(400)
+
+    real_async_client = httpx.AsyncClient
+    upstream_client = real_async_client(
+        transport=httpx.MockTransport(reject_embedding)
+    )
+    monkeypatch.setattr(
+        "tracemem.app.httpx.AsyncClient",
+        lambda: upstream_client,
+    )
+    monkeypatch.setattr(
+        "tracemem.model_clients._BOUNDED_EMBEDDING_DELAY_SECONDS",
+        0.0,
+    )
+    app = create_app(
+        Settings(
+            _env_file=None,
+            api_key="service-secret",
+            database_path=tmp_path / "api-degraded.db",
+            profile="baseline",
+            embedding_mode="openai",
+            embedding_url="https://upstream.test/v1/embeddings",
+            embedding_api_key="embedding-secret",
+            extraction_mode="disabled",
+            rerank_mode="disabled",
+        )
+    )
+
+    async with app.router.lifespan_context(app):
+        async with real_async_client(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            add_response = await client.post(
+                "/add",
+                headers={"X-API-Key": "service-secret"},
+                json={
+                    "request_id": "rejected-embedding",
+                    "user_id": "user",
+                    "session_id": "session",
+                    "messages": [
+                        {"role": "user", "content": "purple bicycles"}
+                    ],
+                },
+            )
+            search_response = await client.post(
+                "/search",
+                headers={"X-API-Key": "service-secret"},
+                json={
+                    "query": "purple bicycles",
+                    "user_id": "user",
+                    "top_k": 5,
+                },
+            )
+
+    assert add_response.status_code == 200
+    assert add_response.json()["success"] is True
+    assert search_response.status_code == 200
+    search_data = search_response.json()["data"]
+    assert len(search_data) == 1
+    assert "purple bicycles" in search_data[0]["content"]
+    assert upstream_attempts == 20

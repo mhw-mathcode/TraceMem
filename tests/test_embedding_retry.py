@@ -259,7 +259,9 @@ async def test_embedding_isolates_batch_and_preserves_good_items() -> None:
 
 
 @pytest.mark.asyncio
-async def test_embedding_degrades_invalid_success_response() -> None:
+async def test_embedding_degrades_invalid_success_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     attempts = 0
     delays: list[float] = []
 
@@ -281,10 +283,61 @@ async def test_embedding_degrades_invalid_success_response() -> None:
             model="embedding",
             sleep=record_sleep,
         )
-        vectors = await embedder.embed(["hello"])
+        with caplog.at_level(
+            logging.WARNING,
+            logger="tracemem.model_clients",
+        ):
+            vectors = await embedder.embed(["hello"])
 
     assert attempts == 10
     assert delays == [0.5] * 9
+    assert len(vectors) == 1
+    assert vectors[0].size == 0
+    assert (
+        "event=embedding_batch_failed attempt=10 status=200 "
+        "error=ModelResponseError"
+    ) in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "component",
+    [None, "1.0", True, float("nan"), float("inf"), 10**1000],
+    ids=["null", "numeric-string", "boolean", "nan", "infinity", "huge-int"],
+)
+async def test_embedding_degrades_invalid_vector_component(
+    component: object,
+) -> None:
+    attempts = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {"data": [{"index": 0, "embedding": [component]}]},
+                allow_nan=True,
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+
+    async def no_sleep(delay: float) -> None:
+        pass
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond)
+    ) as client:
+        embedder = OpenAIEmbedder(
+            client=client,
+            url="https://example.test/v1/embeddings",
+            api_key="secret",
+            model="embedding",
+            sleep=no_sleep,
+        )
+        vectors = await embedder.embed(["hello"])
+
+    assert attempts == 10
     assert len(vectors) == 1
     assert vectors[0].size == 0
 
@@ -405,6 +458,40 @@ async def test_embedding_recovers_from_connection_error(
     assert (
         "event=embedding_retry attempt=1 error=ConnectError delay=0.5"
     ) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_embedding_resets_temporary_backoff_after_bounded_failure() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts in (1, 3):
+            return httpx.Response(503)
+        if attempts == 2:
+            return httpx.Response(400)
+        return _embedding_response()
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond)
+    ) as client:
+        embedder = OpenAIEmbedder(
+            client=client,
+            url="https://example.test/v1/embeddings",
+            api_key="secret",
+            model="embedding",
+            sleep=record_sleep,
+        )
+        vectors = await embedder.embed(["hello"])
+
+    assert attempts == 4
+    assert delays == [0.5, 0.5, 0.5]
+    assert vectors[0].tolist() == [1.0, 0.0]
 
 
 @pytest.mark.asyncio

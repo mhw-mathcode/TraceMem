@@ -256,9 +256,33 @@ class OpenAIEmbedder:
                 for expected_index, item in enumerate(items)
             ):
                 raise ValueError("embedding indexes mismatch")
+            raw_vectors = [item["embedding"] for item in items]
+            float32_limit = float(np.finfo(np.float32).max)
+            for raw_vector in raw_vectors:
+                if not isinstance(raw_vector, list) or not raw_vector:
+                    raise ValueError("embedding must be a non-empty list")
+                for component in raw_vector:
+                    if isinstance(component, bool) or not isinstance(
+                        component,
+                        (int, float),
+                    ):
+                        raise ValueError("embedding component must be numeric")
+                    try:
+                        valid_component = (
+                            math.isfinite(component)
+                            and abs(component) <= float32_limit
+                        )
+                    except OverflowError as error:
+                        raise ValueError(
+                            "embedding component is out of range"
+                        ) from error
+                    if not valid_component:
+                        raise ValueError(
+                            "embedding component must be finite"
+                        )
             vectors = [
-                np.asarray(item["embedding"], dtype=np.float32).reshape(-1)
-                for item in items
+                np.asarray(raw_vector, dtype=np.float32).reshape(-1)
+                for raw_vector in raw_vectors
             ]
             if not vectors:
                 raise ValueError("empty embedding response")
@@ -270,6 +294,7 @@ class OpenAIEmbedder:
             return vectors
         except (
             KeyError,
+            OverflowError,
             TypeError,
             ValueError,
             json.JSONDecodeError,
@@ -332,11 +357,10 @@ class OpenAIEmbedder:
                 await self.sleep(delay)
                 continue
 
-            failure_status: int | None = None
+            temporary_attempt = 0
+            failure_status: int | None = response.status_code
             failure_error: str | None = None
-            if response.is_error:
-                failure_status = response.status_code
-            else:
+            if not response.is_error:
                 try:
                     return self._parse_vectors(response, len(batch))
                 except ModelResponseError as error:
