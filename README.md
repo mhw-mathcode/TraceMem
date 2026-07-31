@@ -113,9 +113,14 @@ available in code but is disabled by default. When
 it as the `X-Embedding-Key` header; other model requests never receive it.
 Remote embedding calls retry connection failures and HTTP 429/500/502/503/504
 responses until they succeed, using exponential backoff and `Retry-After` when
-provided. `TRACEMEM_EMBEDDING_MAX_CONCURRENCY` limits simultaneous embedding
-HTTP attempts and defaults to `3`. `TRACEMEM_MODEL_MAX_RETRIES` continues to
-limit extraction and reranking retries; it does not limit embedding retries.
+provided. Other HTTP errors and malformed successful responses are attempted
+ten times; rejected multi-item batches are then isolated once per item. Inputs
+that still fail are stored with an empty vector and remain available to
+lexical/BM25 retrieval, while Add and Search continue with their normal
+successful response schemas. `TRACEMEM_EMBEDDING_MAX_CONCURRENCY` limits
+simultaneous embedding HTTP attempts and defaults to `3`.
+`TRACEMEM_MODEL_MAX_RETRIES` continues to limit extraction and reranking
+retries; it does not limit embedding retries.
 
 ## LoCoMo retrieval evaluation
 
