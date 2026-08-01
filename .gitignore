@@ -11,3 +11,5 @@ build/
 /benchmarks/
 outputs/
 .vscode/
+docs/
+tests/
