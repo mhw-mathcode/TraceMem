@@ -483,7 +483,11 @@ class _CardPayload(BaseModel):
 class _ExtractionPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    cards: list[_CardPayload]
+    cards: list[Any]
+
+
+def _normalized_enum(value: str) -> str:
+    return value.strip().casefold()
 
 
 class OpenAIExtractor:
@@ -539,9 +543,13 @@ class OpenAIExtractor:
             'top-level key "cards". Every card needs kind, subject, predicate, object, '
             "event_time, polarity, confidence, importance, source_message_indexes, "
             "and relation_hint. kind must be one of fact, event, preference, goal, "
-            "plan, relationship, or causal. event_time must be ISO-8601 or null, "
-            "never relative text. confidence and importance must be numbers from "
-            "0 to 1. Do not infer unsupported facts.\n\n"
+            "plan, relationship, or causal. polarity must be one of positive, "
+            "negative, or uncertain. relation_hint must be one of continue, update, "
+            "correction, conflict, or null; use null when no relation applies. "
+            "Descriptive phrases such as self-reported preference belong in kind "
+            "or the card content, not relation_hint. event_time must be ISO-8601 or "
+            "null, never relative text. confidence and importance must be numbers "
+            "from 0 to 1. Do not infer unsupported facts.\n\n"
             + json.dumps(input_payload, ensure_ascii=False)
         )
         try:
@@ -581,18 +589,48 @@ class OpenAIExtractor:
             raise ModelResponseError("Extraction response has an invalid schema") from error
 
         extracted: list[ExtractedCard] = []
-        for card in payload.cards:
-            kind = "fact" if card.kind == "memory" else card.kind
+        normalized_cards = 0
+        rejected_cards = 0
+        for raw_card in payload.cards:
+            try:
+                card = _CardPayload.model_validate(raw_card)
+            except ValidationError:
+                rejected_cards += 1
+                continue
+
+            card_normalized = False
+            kind = _normalized_enum(card.kind)
+            if kind != card.kind:
+                card_normalized = True
+            if kind == "memory":
+                kind = "fact"
+                card_normalized = True
             if kind not in self._KINDS:
-                raise ModelResponseError(f"Unsupported memory kind: {kind}")
-            if card.polarity not in self._POLARITIES:
-                raise ModelResponseError(f"Unsupported polarity: {card.polarity}")
-            if card.relation_hint not in self._RELATIONS:
-                raise ModelResponseError(
-                    f"Unsupported relation hint: {card.relation_hint}"
-                )
+                rejected_cards += 1
+                continue
+
+            polarity = _normalized_enum(card.polarity)
+            if polarity != card.polarity:
+                card_normalized = True
+            if polarity not in self._POLARITIES:
+                rejected_cards += 1
+                continue
+
+            relation_hint = card.relation_hint
+            if relation_hint is not None:
+                normalized_relation = _normalized_enum(relation_hint)
+                if normalized_relation != relation_hint:
+                    card_normalized = True
+                relation_hint = normalized_relation
+                if relation_hint not in self._RELATIONS:
+                    relation_hint = None
+                    card_normalized = True
+
             if not set(card.source_message_indexes) <= allowed_indexes:
-                raise ModelResponseError("Card references an unknown source message index")
+                rejected_cards += 1
+                continue
+            if card_normalized:
+                normalized_cards += 1
             extracted.append(
                 ExtractedCard(
                     kind=kind,  # type: ignore[arg-type]
@@ -600,13 +638,22 @@ class OpenAIExtractor:
                     predicate=card.predicate,
                     object=card.object,
                     event_time=_optional_timestamp(card.event_time),
-                    polarity=card.polarity,  # type: ignore[arg-type]
+                    polarity=polarity,  # type: ignore[arg-type]
                     confidence=card.confidence,
                     importance=card.importance,
                     source_message_indexes=tuple(card.source_message_indexes),
-                    relation_hint=card.relation_hint,  # type: ignore[arg-type]
+                    relation_hint=relation_hint,  # type: ignore[arg-type]
                 )
             )
+        log_event(
+            logger,
+            logging.INFO,
+            "card_extraction_parsed",
+            returned=len(payload.cards),
+            accepted=len(extracted),
+            normalized=normalized_cards,
+            rejected=rejected_cards,
+        )
         return extracted
 
 
