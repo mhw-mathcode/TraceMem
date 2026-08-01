@@ -204,11 +204,13 @@ async def test_lifespan_logs_database_initialization(
     async with app.router.lifespan_context(app):
         pass
 
-    assert database_path.stat().st_size > 0
+    database_files = list(tmp_path.glob("runtime-*.db"))
+    assert len(database_files) == 1
+    assert database_files[0].stat().st_size > 0
     output = stream.getvalue()
     assert "event=startup_started" in output
     assert "event=database_initialized" in output
-    assert "runtime.db" in output
+    assert database_files[0].name in output
     assert "event=startup_completed" in output
     assert "event=shutdown_completed" in output
 

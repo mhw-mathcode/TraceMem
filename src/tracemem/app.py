@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import AsyncIterator
@@ -41,6 +44,41 @@ from tracemem.search_service import SearchService
 logger = logging.getLogger(__name__)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _timestamped_database_path(
+    path: Path,
+    *,
+    now: Callable[[], datetime] = _utc_now,
+    process_id: int | None = None,
+) -> Path:
+    if path == Path(":memory:"):
+        return path
+
+    timestamp = now().astimezone(timezone.utc).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+    suffix = path.suffix
+    base_name = path.stem if suffix else path.name
+    primary = path.with_name(f"{base_name}-{timestamp}{suffix}")
+    if not primary.exists():
+        return primary
+
+    pid = os.getpid() if process_id is None else process_id
+    fallback = path.with_name(
+        f"{base_name}-{timestamp}-p{pid}{suffix}"
+    )
+    counter = 2
+    while fallback.exists():
+        fallback = path.with_name(
+            f"{base_name}-{timestamp}-p{pid}-{counter}{suffix}"
+        )
+        counter += 1
+    return fallback
+
+
 def _file_size(path: Path) -> int | None:
     try:
         return path.stat().st_size
@@ -71,7 +109,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             stage = "database_initialization"
             database_started = perf_counter()
-            database = Database(active_settings.database_path)
+            database = Database(
+                _timestamped_database_path(active_settings.database_path)
+            )
             database.initialize()
             database_path = database.path.resolve()
             log_event(
