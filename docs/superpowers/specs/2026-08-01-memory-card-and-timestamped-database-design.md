@@ -113,8 +113,11 @@ database and retains earlier runs for diagnosis.
 
 If the configured filename has an extension, the timestamp is inserted before
 it. If it has no extension, the timestamp is appended. A process-id suffix is
-used only if the generated timestamped path already exists, preventing an
-accidental collision without changing the normal filename format.
+used only if the generated timestamped path already exists. Candidate files are
+reserved atomically before SQLite initialization; if a competing startup wins
+the same name, path selection retries with the process-id and numeric suffixes.
+This prevents concurrent service startups from sharing one database without
+changing the normal filename format.
 
 ## Compatibility and Configuration
 

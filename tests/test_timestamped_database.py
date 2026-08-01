@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import re
 import logging
+import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -78,6 +79,60 @@ def test_timestamped_database_path_uses_process_id_on_collision(
 
     assert result == tmp_path / "tracemem-20260801T063052123456Z-p4321.db"
     assert result != primary
+
+
+def test_timestamped_database_path_uses_counter_after_pid_collision(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "tracemem-20260801T063052123456Z.db"
+    pid_candidate = tmp_path / "tracemem-20260801T063052123456Z-p4321.db"
+    primary.write_bytes(b"existing")
+    pid_candidate.write_bytes(b"existing")
+
+    result = _timestamped_database_path(
+        tmp_path / "tracemem.db",
+        now=lambda: datetime(
+            2026,
+            8,
+            1,
+            6,
+            30,
+            52,
+            123456,
+            tzinfo=timezone.utc,
+        ),
+        process_id=4321,
+    )
+
+    assert result == tmp_path / "tracemem-20260801T063052123456Z-p4321-2.db"
+
+
+def test_timestamped_database_path_atomically_reserves_unique_files(
+    tmp_path: Path,
+) -> None:
+    fixed_time = datetime(
+        2026,
+        8,
+        1,
+        6,
+        30,
+        52,
+        123456,
+        tzinfo=timezone.utc,
+    )
+
+    def reserve(_index: int) -> Path:
+        return _timestamped_database_path(
+            tmp_path / "tracemem.db",
+            now=lambda: fixed_time,
+            process_id=4321,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        paths = list(executor.map(reserve, range(2)))
+
+    assert len(set(paths)) == 2
+    assert all(path.is_file() for path in paths)
 
 
 def _settings(database_path: Path) -> Settings:

@@ -62,21 +62,28 @@ def _timestamped_database_path(
     )
     suffix = path.suffix
     base_name = path.stem if suffix else path.name
-    primary = path.with_name(f"{base_name}-{timestamp}{suffix}")
-    if not primary.exists():
-        return primary
-
+    path.parent.mkdir(parents=True, exist_ok=True)
     pid = os.getpid() if process_id is None else process_id
-    fallback = path.with_name(
-        f"{base_name}-{timestamp}-p{pid}{suffix}"
-    )
-    counter = 2
-    while fallback.exists():
-        fallback = path.with_name(
-            f"{base_name}-{timestamp}-p{pid}-{counter}{suffix}"
-        )
-        counter += 1
-    return fallback
+    counter = 0
+    while True:
+        if counter == 0:
+            name = f"{base_name}-{timestamp}{suffix}"
+        elif counter == 1:
+            name = f"{base_name}-{timestamp}-p{pid}{suffix}"
+        else:
+            name = f"{base_name}-{timestamp}-p{pid}-{counter}{suffix}"
+        candidate = path.with_name(name)
+        try:
+            descriptor = os.open(
+                candidate,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError:
+            counter += 1
+            continue
+        os.close(descriptor)
+        return candidate
 
 
 def _file_size(path: Path) -> int | None:

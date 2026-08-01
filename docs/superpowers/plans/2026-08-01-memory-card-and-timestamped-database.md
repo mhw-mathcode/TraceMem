@@ -220,7 +220,10 @@ In `src/tracemem/app.py`:
 - If the primary candidate exists, append `-p<process id>` before the suffix; if that path also exists, append an increasing numeric suffix until an unused path is found.
 - In lifespan, call the helper once and construct `Database` from that resolved path.
 
-Do not create or remove files inside the helper; schema initialization remains owned by `Database.initialize()`.
+Atomically reserve each candidate with `O_CREAT | O_EXCL` before returning it,
+so concurrent startups cannot select the same database. The helper may create
+the parent directory and an empty reserved file; schema initialization remains
+owned by `Database.initialize()`.
 
 - [ ] **Step 6: Run timestamp and observability tests and verify GREEN**
 

@@ -144,6 +144,45 @@ async def test_invalid_cards_do_not_discard_valid_siblings(
 
 
 @pytest.mark.asyncio
+async def test_legacy_and_schema_variations_are_isolated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response_payload = {
+        "cards": [
+            _card(kind=" Memory ", object="legacy-memory"),
+            _card(
+                relation_hint=" UPDATE ",
+                object="normalized-relation",
+            ),
+            _card(polarity="unsupported", object="invalid-polarity"),
+            {
+                key: value
+                for key, value in _card(object="missing-object").items()
+                if key != "object"
+            },
+        ]
+    }
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_completion(response_payload))
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond)
+    ) as client:
+        with caplog.at_level(logging.INFO, logger="tracemem.model_clients"):
+            cards = await _extractor(client).extract([_message()])
+
+    assert [(card.kind, card.relation_hint) for card in cards] == [
+        ("fact", None),
+        ("preference", "update"),
+    ]
+    assert (
+        "event=card_extraction_parsed returned=4 accepted=2 "
+        "normalized=2 rejected=2"
+    ) in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_extraction_request_enumerates_optional_contract_values() -> None:
     prompts: list[str] = []
 
