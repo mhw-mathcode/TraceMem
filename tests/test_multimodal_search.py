@@ -21,8 +21,10 @@ def image_part():
 class FakeDatabase:
     def __init__(self, payloads):
         self.payloads = payloads
+        self.calls = []
 
     def load_original_contents(self, ids):
+        self.calls.append(list(ids))
         return {key: value for key, value in self.payloads.items() if key in ids}
 
 
@@ -64,3 +66,16 @@ async def test_search_skips_whole_image_result_that_exceeds_remaining_budget(mon
     result = await service.search(SearchRequest(query="object", user_id="u1", top_k=2))
     assert [item.id for item in result.data] == ["e1", "e3"]
     assert isinstance(result.data[1].content, str)
+
+
+@pytest.mark.asyncio
+async def test_search_loads_only_images_needed_for_top_k():
+    parts = [image_part()]
+    retriever = FakeRetriever([
+        candidate("e1", "red bicycle", 3),
+        candidate("e2", "blue boat", 2),
+    ], {"e1": parts, "e2": parts})
+    service = SearchService(retriever=retriever)
+    result = await service.search(SearchRequest(query="object", user_id="u1", top_k=1))
+    assert [item.id for item in result.data] == ["e1"]
+    assert retriever.database.calls == [["e1"]]

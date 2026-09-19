@@ -11,6 +11,7 @@ from typing import AsyncIterator
 
 import httpx
 from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from tracemem.add_service import (
@@ -192,6 +193,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Temporal evidence-ledger memory service.",
         lifespan=lifespan,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def handle_request_validation(
+        _request: Request,
+        error: RequestValidationError,
+    ) -> JSONResponse:
+        details = [
+            {"loc": list(item["loc"]), "msg": item["msg"], "type": item["type"]}
+            for item in error.errors()
+        ]
+        return JSONResponse(status_code=422, content={"detail": details})
 
     @app.exception_handler(AddConflict)
     async def handle_add_conflict(

@@ -123,13 +123,14 @@ class SearchService:
                     duration_ms=duration_ms(started),
                 )
                 return SearchResponse(data=[])
-            original_contents = self.retriever.database.load_original_contents(
-                [candidate.id for candidate in ranked if candidate.source_type == "episode"]
-            )
             selected = []
             used_image_bytes = 0
             for candidate in ranked:
-                content = original_contents.get(candidate.id)
+                content = None
+                if candidate.source_type == "episode":
+                    content = self.retriever.database.load_original_contents(
+                        [candidate.id]
+                    ).get(candidate.id)
                 if content is None:
                     content = render_candidate(candidate)
                 size = image_bytes(content)

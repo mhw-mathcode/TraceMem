@@ -1,4 +1,6 @@
 import base64
+import struct
+import zlib
 from io import BytesIO
 
 import pytest
@@ -100,4 +102,15 @@ def test_add_rejects_image_over_single_image_limit(monkeypatch):
     with pytest.raises(ValidationError):
         AddRequest.model_validate(request_with_content([
             {"type": "image_url", "image_url": {"url": image_url()}}
+        ]))
+
+
+def test_add_rejects_decompression_bomb_as_validation_error():
+    data = bytearray(base64.b64decode(image_url().split(",")[1]))
+    data[16:24] = struct.pack(">II", 20000, 20000)
+    data[29:33] = struct.pack(">I", zlib.crc32(data[12:29]))
+    url = "data:image/png;base64," + base64.b64encode(data).decode()
+    with pytest.raises(ValidationError):
+        AddRequest.model_validate(request_with_content([
+            {"type": "image_url", "image_url": {"url": url}}
         ]))

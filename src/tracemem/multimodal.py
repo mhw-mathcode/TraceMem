@@ -35,7 +35,7 @@ def decoded_image_size(url: str) -> int:
             if picture.format != _FORMATS[mime]:
                 raise ValueError("image MIME type does not match its data")
             picture.verify()
-    except (UnidentifiedImageError, OSError) as error:
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
         raise ValueError("image data is not a valid JPEG, PNG, or WebP") from error
     return len(data)
 

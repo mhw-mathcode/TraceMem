@@ -48,7 +48,15 @@ async def test_http_image_only_add_then_text_search_returns_original_part(tmp_pa
                     {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
                 ]}],
             })
+            invalid_private = await client.post("/add", headers={"X-API-Key": "secret"}, json={
+                "request_id": "r3", "user_id": "u1", "session_id": "s1",
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,PRIVATE%%%"}}
+                ]}],
+            })
     assert add.status_code == 200
     assert search.status_code == 200
     assert search.json()["data"][0]["content"] == parts
     assert invalid.status_code == 422
+    assert invalid_private.status_code == 422
+    assert "PRIVATE%%%" not in invalid_private.text
