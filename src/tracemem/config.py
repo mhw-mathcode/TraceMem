@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     )
     llm_api_key: str = ""
     llm_model: str = "qwen-plus"
+    vision_url: str = "https://api.openai.com/v1/chat/completions"
+    vision_api_key: str = ""
+    vision_model: str = "gpt-4o-mini"
     rerank_url: str = (
         "https://dashscope.aliyuncs.com/api/v1/services/"
         "rerank/text-rerank/text-rerank"

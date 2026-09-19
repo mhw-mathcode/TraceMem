@@ -17,6 +17,7 @@ from tracemem.model_clients import (
     OpenAIReranker,
     Reranker,
 )
+from tracemem.vision import OpenAIVisionDescriber, VisionDescriber
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class ModelBundle:
     embedder: Embedder
     extractor: Extractor
     reranker: Reranker
+    vision: VisionDescriber
 
 
 def build_model_bundle(
@@ -83,4 +85,12 @@ def build_model_bundle(
         embedder=embedder,
         extractor=extractor,
         reranker=reranker,
+        vision=OpenAIVisionDescriber(
+            client=client,
+            url=settings.vision_url,
+            api_key=settings.vision_api_key,
+            model=settings.vision_model,
+            timeout_seconds=settings.model_timeout_seconds,
+            max_retries=settings.model_max_retries,
+        ),
     )
