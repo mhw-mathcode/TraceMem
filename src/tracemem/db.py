@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
+from pydantic import TypeAdapter
+
 from tracemem.domain import (
     Candidate,
     ClaimResult,
@@ -19,6 +21,10 @@ from tracemem.domain import (
     VectorRecord,
 )
 from tracemem.text import pack_vector, unpack_vector
+from tracemem.multimodal import ContentPart
+
+
+_parts_adapter = TypeAdapter(list[ContentPart])
 
 
 def _utc_now() -> datetime:
@@ -96,6 +102,11 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS episodes_user_idx
                     ON episodes(user_id, ingested_at);
+
+                CREATE TABLE IF NOT EXISTS episode_payloads (
+                    episode_id TEXT PRIMARY KEY REFERENCES episodes(id),
+                    content_json TEXT NOT NULL
+                );
 
                 CREATE VIRTUAL TABLE IF NOT EXISTS episode_fts USING fts5(
                     user_id UNINDEXED,
@@ -302,6 +313,17 @@ class Database:
                     "INSERT INTO episode_fts(user_id, memory_id, lexical_text) VALUES (?, ?, ?)",
                     (item.user_id, item.id, item.lexical_text),
                 )
+                if item.original_content is not None:
+                    connection.execute(
+                        "INSERT INTO episode_payloads(episode_id, content_json) VALUES (?, ?)",
+                        (
+                            item.id,
+                            json.dumps(
+                                [part.model_dump(mode="json") for part in item.original_content],
+                                ensure_ascii=False,
+                            ),
+                        ),
+                    )
 
             for card in cards:
                 vector_blob, dimensions = pack_vector(card.embedding)
@@ -467,6 +489,22 @@ class Database:
             )
             for row in rows
         ]
+
+    def load_original_contents(
+        self, episode_ids: Sequence[str]
+    ) -> dict[str, list[ContentPart]]:
+        if not episode_ids:
+            return {}
+        placeholders = ",".join("?" for _ in episode_ids)
+        with self._session() as connection:
+            rows = connection.execute(
+                f"SELECT episode_id, content_json FROM episode_payloads WHERE episode_id IN ({placeholders})",
+                tuple(episode_ids),
+            ).fetchall()
+        return {
+            row["episode_id"]: _parts_adapter.validate_python(json.loads(row["content_json"]))
+            for row in rows
+        }
 
     def load_card_vectors(self, user_id: str) -> list[VectorRecord]:
         with self._session() as connection:

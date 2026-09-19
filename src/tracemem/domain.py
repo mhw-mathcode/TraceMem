@@ -7,6 +7,8 @@ from typing import Literal
 
 import numpy as np
 
+from tracemem.multimodal import ContentPart
+
 
 class ClaimStatus(str, Enum):
     CLAIMED = "claimed"
@@ -38,6 +40,7 @@ class EpisodeDraft:
     ingested_at: datetime
     importance: float
     embedding: np.ndarray
+    original_content: list[ContentPart] | None = None
 
 
 @dataclass(frozen=True)
