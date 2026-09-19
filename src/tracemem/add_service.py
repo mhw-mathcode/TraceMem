@@ -16,6 +16,7 @@ from tracemem.model_clients import (
     MessageForExtraction,
     ModelError,
 )
+from tracemem.multimodal import ImagePart, context_text, index_text
 from tracemem.observability import duration_ms, log_event
 from tracemem.text import (
     lexical_text,
@@ -23,6 +24,7 @@ from tracemem.text import (
     stable_id,
     timestamp_to_datetime,
 )
+from tracemem.vision import VisionDescriber, VisionError, VisionUnavailable
 
 
 def _utc_now() -> datetime:
@@ -55,6 +57,7 @@ class AddService:
         database: Database,
         embedder: Embedder,
         extractor: Extractor,
+        vision: VisionDescriber | None = None,
         clock: Callable[[], datetime] = _utc_now,
         lease_seconds: int = 120,
         wait_seconds: float = 5.0,
@@ -63,6 +66,7 @@ class AddService:
         self.database = database
         self.embedder = embedder
         self.extractor = extractor
+        self.vision = vision
         self.clock = clock
         self.lease_seconds = lease_seconds
         self.wait_seconds = wait_seconds
@@ -158,11 +162,37 @@ class AddService:
         )
 
         ingested_at = self.clock().astimezone(timezone.utc)
+        indexed_texts: list[str] = []
+        try:
+            for message in request.messages:
+                descriptions: list[str] = []
+                if isinstance(message.content, list):
+                    for part in message.content:
+                        if isinstance(part, ImagePart):
+                            if self.vision is None:
+                                raise VisionUnavailable("vision API is not configured")
+                            descriptions.append(
+                                await self.vision.describe(
+                                    part.image_url.url,
+                                    context_text(message.content),
+                                )
+                            )
+                indexed_texts.append(index_text(message.content, descriptions))
+        except VisionError as error:
+            self.database.mark_add_failed(request.request_id, "vision_failed")
+            log_event(
+                logger,
+                logging.ERROR,
+                "add_failed",
+                request_id=request.request_id,
+                stage="vision",
+                error=type(error).__name__,
+                duration_ms=duration_ms(started),
+            )
+            raise AddDependencyError("image description failed") from error
         episode_embedding_started = perf_counter()
         try:
-            vectors = await self.embedder.embed(
-                [message.content for message in request.messages]
-            )
+            vectors = await self.embedder.embed(indexed_texts)
             if len(vectors) != len(request.messages):
                 raise RuntimeError("embedding count mismatch")
         except Exception as error:
@@ -195,12 +225,13 @@ class AddService:
                 request_id=request.request_id,
                 message_index=index,
                 role=message.role,
-                content=message.content,
-                lexical_text=lexical_text(message.content),
+                content=indexed_texts[index],
+                lexical_text=lexical_text(indexed_texts[index]),
                 event_time=timestamp_to_datetime(message.timestamp),
                 ingested_at=ingested_at,
                 importance=1.0,
                 embedding=vectors[index],
+                original_content=(message.content if isinstance(message.content, list) else None),
             )
             for index, message in enumerate(request.messages)
         ]
@@ -217,7 +248,7 @@ class AddService:
                     MessageForExtraction(
                         index=index,
                         role=message.role,
-                        content=message.content,
+                        content=indexed_texts[index],
                         timestamp=message.timestamp,
                     )
                     for index, message in enumerate(request.messages)

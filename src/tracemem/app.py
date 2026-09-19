@@ -143,6 +143,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 database=database,
                 embedder=models.embedder,
                 extractor=models.extractor,
+                vision=models.vision,
                 lease_seconds=active_settings.add_lease_seconds,
             )
             app.state.search_service = SearchService(
