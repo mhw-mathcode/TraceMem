@@ -12,6 +12,7 @@ from tracemem.evidence import (
     render_candidate,
 )
 from tracemem.model_clients import DisabledReranker, ModelError, Reranker
+from tracemem.multimodal import MAX_RESPONSE_IMAGE_BYTES, image_bytes
 from tracemem.observability import duration_ms, log_event
 from tracemem.retrieval import HybridRetriever
 
@@ -107,12 +108,12 @@ class SearchService:
 
             stage = "packing"
             limit = min(request.top_k, self.final_result_limit, plan.final_limit)
-            selected = self.packer.pack(
+            ranked = self.packer.pack(
                 plan=plan,
                 candidates=candidates,
-                limit=limit,
+                limit=len(candidates),
             )
-            if not selected:
+            if not ranked:
                 log_event(
                     logger,
                     logging.INFO,
@@ -122,13 +123,31 @@ class SearchService:
                     duration_ms=duration_ms(started),
                 )
                 return SearchResponse(data=[])
-            maximum = max(candidate.score for candidate in selected)
-            minimum = min(candidate.score for candidate in selected)
+            original_contents = self.retriever.database.load_original_contents(
+                [candidate.id for candidate in ranked if candidate.source_type == "episode"]
+            )
+            selected = []
+            used_image_bytes = 0
+            for candidate in ranked:
+                content = original_contents.get(candidate.id)
+                if content is None:
+                    content = render_candidate(candidate)
+                size = image_bytes(content)
+                if used_image_bytes + size > MAX_RESPONSE_IMAGE_BYTES:
+                    continue
+                selected.append((candidate, content))
+                used_image_bytes += size
+                if len(selected) >= limit:
+                    break
+            if not selected:
+                return SearchResponse(data=[])
+            maximum = max(candidate.score for candidate, _ in selected)
+            minimum = min(candidate.score for candidate, _ in selected)
             span = maximum - minimum
             results = [
                 SearchResult(
                     id=candidate.id,
-                    content=render_candidate(candidate),
+                    content=content,
                     score=(
                         (candidate.score - minimum) / span
                         if span > 0
@@ -136,7 +155,7 @@ class SearchService:
                     ),
                     created_at=candidate.created_at,
                 )
-                for candidate in selected
+                for candidate, content in selected
             ]
             log_event(
                 logger,
