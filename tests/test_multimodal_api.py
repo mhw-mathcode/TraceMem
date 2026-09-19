@@ -68,6 +68,11 @@ def test_add_rejects_empty_text_part():
         AddRequest.model_validate(request_with_content([{"type": "text", "text": ""}]))
 
 
+def test_add_rejects_whitespace_only_text_part():
+    with pytest.raises(ValidationError):
+        AddRequest.model_validate(request_with_content([{"type": "text", "text": "   "}]))
+
+
 def test_add_rejects_mismatched_mime():
     url = image_url().replace("data:image/png;", "data:image/jpeg;")
     with pytest.raises(ValidationError):
@@ -85,3 +90,14 @@ def test_add_rejects_aggregate_limit_across_messages(monkeypatch):
     payload["messages"].append(payload["messages"][0].copy())
     with pytest.raises(ValidationError):
         AddRequest.model_validate(payload)
+
+
+def test_add_rejects_image_over_single_image_limit(monkeypatch):
+    import tracemem.multimodal as multimodal
+
+    size = len(base64.b64decode(image_url().split(",")[1]))
+    monkeypatch.setattr(multimodal, "MAX_IMAGE_BYTES", size - 1)
+    with pytest.raises(ValidationError):
+        AddRequest.model_validate(request_with_content([
+            {"type": "image_url", "image_url": {"url": image_url()}}
+        ]))

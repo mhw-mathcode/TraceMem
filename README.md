@@ -72,6 +72,49 @@ curl -X POST http://127.0.0.1:8888/search \
   }'
 ```
 
+For multimodal memory, a message's `content` may instead be an ordered array
+of nonempty text parts and inline images. A message may contain only images:
+
+```json
+{
+  "request_id": "request-photo-1",
+  "user_id": "user-1",
+  "session_id": "session-1",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "Photo from the trip"},
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,<base64 image bytes>"}}
+    ]
+  }]
+}
+```
+
+Use an actual Base64 Data URI in place of the bracketed example value; remote
+image URLs are not accepted. JPEG, PNG, and WebP are supported. Each decoded
+image must be at most 10 MiB; all images in one Add request must total at most
+30 MiB. Search returns the original parts in order for image-bearing episodes,
+with at most 30 MiB of decoded images across one response. Results that would
+exceed that response limit are omitted whole. Plain strings continue to work
+for text-only messages and results.
+
+Configure a vision-capable OpenAI-compatible Chat Completions endpoint to make
+images searchable by what they depict:
+
+```dotenv
+TRACEMEM_VISION_URL=https://api.openai.com/v1/chat/completions
+TRACEMEM_VISION_API_KEY=replace-with-your-vision-api-key
+TRACEMEM_VISION_MODEL=gpt-4o-mini
+```
+
+TraceMem asks the vision model for a factual description at Add time and
+indexes that description with its existing text search. The original image is
+retained separately and returned on Search. This supports text-to-image
+retrieval, including image-only messages, but not image-to-image queries.
+Without a vision key, text-only requests still work; an image-bearing Add
+returns HTTP 502 rather than accepting an image it cannot index. Image
+description quality affects retrieval quality. Vision API use may incur cost.
+
 After changing `.env`, restart the Uvicorn process so it loads the new key.
 Swagger at `/docs` remains public; click **Authorize** and enter the key to
 test `/add` and `/search`.

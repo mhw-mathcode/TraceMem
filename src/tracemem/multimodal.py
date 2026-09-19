@@ -46,6 +46,13 @@ class TextPart(BaseModel):
     type: Literal["text"]
     text: str = Field(min_length=1)
 
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, text: str) -> str:
+        if not text.strip():
+            raise ValueError("text part must not be blank")
+        return text
+
 
 class ImageURL(BaseModel):
     model_config = ConfigDict(extra="forbid")
