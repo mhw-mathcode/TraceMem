@@ -11,5 +11,7 @@ build/
 /benchmarks/
 outputs/
 .vscode/
+.venv/
+.superpowers/
 docs/
 tests/

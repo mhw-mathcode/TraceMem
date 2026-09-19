@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from tracemem.multimodal import Content, MAX_REQUEST_IMAGE_BYTES, image_bytes
 
 
 class MemoryMessage(BaseModel):
@@ -9,7 +11,7 @@ class MemoryMessage(BaseModel):
 
     role: Literal["user", "assistant", "system", "tool"]
     timestamp: int | float | str | None = None
-    content: str = Field(min_length=1)
+    content: Content
 
 
 class AddRequest(BaseModel):
@@ -19,6 +21,12 @@ class AddRequest(BaseModel):
     messages: list[MemoryMessage] = Field(min_length=1)
     user_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_total_image_bytes(self) -> "AddRequest":
+        if sum(image_bytes(message.content) for message in self.messages) > MAX_REQUEST_IMAGE_BYTES:
+            raise ValueError("Add images exceed 30 MiB")
+        return self
 
 
 class AddResponse(BaseModel):
@@ -43,7 +51,7 @@ class SearchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
-    content: str = Field(min_length=1)
+    content: Content
     score: float | None = None
     created_at: datetime | None = None
 
